@@ -227,6 +227,63 @@ struct strata_context_impl {
 
     Slot slot;
 
+    struct TelemetrySnap {
+        bool     is_processing             = false;
+        int32_t  id_task                   = -1;
+        uint64_t n_prompt_tokens           = 0;
+        uint64_t n_prompt_tokens_processed = 0;
+        uint64_t n_prompt_tokens_cache     = 0;
+        uint64_t n_generated_tokens        = 0;
+        int32_t  n_remain                  = -1;
+        bool     has_next_token            = true;
+        bool     has_new_line              = false;
+        uint64_t last_kv_tokens            = 0;
+        uint64_t last_cache_tokens         = 0;
+    };
+    mutable std::mutex telemetry_mtx;
+    TelemetrySnap telemetry;
+
+    json snapshot_slot_json() const {
+        std::lock_guard<std::mutex> lk(telemetry_mtx);
+        const uint64_t pt = telemetry.is_processing ? telemetry.n_prompt_tokens : telemetry.last_kv_tokens;
+        const uint64_t pc = telemetry.is_processing ? telemetry.n_prompt_tokens_cache : telemetry.last_cache_tokens;
+        json s = {
+            {"id", 0},
+            {"id_task", telemetry.id_task},
+            {"n_ctx", n_ctx},
+            {"is_processing", telemetry.is_processing},
+            {"n_prompt_tokens", pt},
+            {"n_prompt_tokens_processed", telemetry.is_processing ? telemetry.n_prompt_tokens_processed : 0},
+            {"n_prompt_tokens_cache", pc},
+            {"n_generated_tokens", telemetry.is_processing ? telemetry.n_generated_tokens : 0},
+            {"next_token", json::array({
+                {
+                    {"has_next_token", telemetry.is_processing ? telemetry.has_next_token : true},
+                    {"has_new_line", telemetry.is_processing ? telemetry.has_new_line : false},
+                    {"n_remain", telemetry.is_processing ? telemetry.n_remain : -1},
+                    {"n_decoded", telemetry.is_processing ? telemetry.n_generated_tokens : 0},
+                }
+            })},
+        };
+        return s;
+    }
+
+    struct MetricsSnap {
+        server_metrics metrics;
+        int n_processing = 0;
+    };
+
+    MetricsSnap snapshot_metrics(bool reset_bucket = true) {
+        std::lock_guard<std::mutex> lk(telemetry_mtx);
+        MetricsSnap out;
+        out.metrics      = metrics;
+        out.n_processing = telemetry.is_processing ? 1 : 0;
+        if (reset_bucket) {
+            metrics.reset_bucket();
+        }
+        return out;
+    }
+
     const char * engine_name() const {
         if (engine_is_hy4) return "strata-hy4";
         if (engine_is_inkling_metal) return "strata-inkling";
@@ -378,6 +435,18 @@ struct strata_context_impl {
         }
         slot.started = true;
         slot.stats.update_prompt_start();
+        {
+            std::lock_guard<std::mutex> lk(telemetry_mtx);
+            telemetry.is_processing             = true;
+            telemetry.id_task                   = t.id;
+            telemetry.n_prompt_tokens           = (uint64_t) n_prompt;
+            telemetry.n_prompt_tokens_processed = 0;
+            telemetry.n_prompt_tokens_cache     = 0;
+            telemetry.n_generated_tokens        = 0;
+            telemetry.n_remain                  = slot.n_predict;
+            telemetry.has_next_token            = true;
+            telemetry.has_new_line              = false;
+        }
         SRV_INF("task %d: %s prompt=%d n_predict=%d\n", t.id, header.c_str(), n_prompt, slot.n_predict);
 
         if (t.params.stream) {
@@ -712,9 +781,24 @@ struct strata_context_impl {
 
             case EngineLine::RESUME:
                 slot.stats.n_prompt_cached = (uint64_t) line.n;
+                {
+                    std::lock_guard<std::mutex> lk(telemetry_mtx);
+                    const uint64_t cached = (uint64_t) std::max<long long>(0, line.n);
+                    telemetry.n_prompt_tokens_cache = cached;
+                    if (cached > telemetry.n_prompt_tokens_processed) {
+                        telemetry.n_prompt_tokens_processed = cached;
+                    }
+                }
                 break;
 
             case EngineLine::PP:
+                {
+                    std::lock_guard<std::mutex> lk(telemetry_mtx);
+                    const uint64_t done = (uint64_t) std::max<long long>(0, line.pp_done);
+                    if (done > telemetry.n_prompt_tokens_processed) {
+                        telemetry.n_prompt_tokens_processed = done;
+                    }
+                }
                 if (!slot.cancelled && slot.task->params.stream && slot.task->params.return_progress) {
                     send_partial_response(completion_token_output{}, /* is_progress */ true, false, line.pp_done);
                 }
@@ -765,6 +849,16 @@ struct strata_context_impl {
         }
         slot.stats.n_gen++;
         slot.stats.update_gen_last();
+        {
+            std::lock_guard<std::mutex> lk(telemetry_mtx);
+            telemetry.n_prompt_tokens_processed = telemetry.n_prompt_tokens;
+            telemetry.n_generated_tokens        = slot.stats.n_gen;
+            telemetry.n_remain = slot.n_predict >= 0
+                ? std::max<int32_t>(0, slot.n_predict - (int32_t) slot.stats.n_gen)
+                : -1;
+            metrics.n_decode++;
+            metrics.n_busy_slots++;
+        }
 
         completion_token_output result;
         result.tok          = tok;
@@ -879,6 +973,22 @@ struct strata_context_impl {
     }
 
     void finish_slot() {
+        {
+            std::lock_guard<std::mutex> lk(telemetry_mtx);
+            if (!slot.cancelled && slot.task) {
+                telemetry.last_kv_tokens    = (uint64_t) slot.task->n_tokens() + slot.stats.n_gen;
+                telemetry.last_cache_tokens = slot.stats.n_prompt_cached;
+            }
+            telemetry.is_processing             = false;
+            telemetry.id_task                   = -1;
+            telemetry.n_prompt_tokens           = 0;
+            telemetry.n_prompt_tokens_processed = 0;
+            telemetry.n_prompt_tokens_cache     = 0;
+            telemetry.n_generated_tokens        = 0;
+            telemetry.n_remain                  = -1;
+            telemetry.has_next_token            = true;
+            telemetry.has_new_line              = false;
+        }
         slot.release();
         queue_tasks.pop_deferred_task(-1);
     }
@@ -963,11 +1073,19 @@ struct strata_context_impl {
         res->generation_params = t.params;
 
         // cumulative server metrics
-        metrics.add_prompt(slot.stats.n_prompt_processed, (uint64_t) std::max<double>(0, slot.stats.t_prompt_ms() * 1000));
-        metrics.add_prompt_cached(slot.stats.n_prompt_cached);
-        metrics.predict.add(slot.stats.n_gen, slot.stats.n_gen_steps(), (uint64_t) slot.stats.t_gen_us());
-        metrics.n_draft_tokens   += slot.stats.n_draft_tokens;
-        metrics.n_draft_accepted += slot.stats.n_draft_accepted;
+        {
+            std::lock_guard<std::mutex> lk(telemetry_mtx);
+            metrics.add_prompt(slot.stats.n_prompt_processed, (uint64_t) std::max<double>(0, slot.stats.t_prompt_ms() * 1000));
+            metrics.add_prompt_cached(slot.stats.n_prompt_cached);
+            metrics.predict.add(slot.stats.n_gen, slot.stats.n_gen_steps(), (uint64_t) slot.stats.t_gen_us());
+            metrics.predict_bucket.add(slot.stats.n_gen, slot.stats.n_gen_steps(), (uint64_t) slot.stats.t_gen_us());
+            metrics.n_tokens_max = std::max<uint64_t>(metrics.n_tokens_max, (uint64_t) t.n_tokens() + slot.stats.n_gen);
+            metrics.n_draft_tokens   += slot.stats.n_draft_tokens;
+            metrics.n_draft_accepted += slot.stats.n_draft_accepted;
+            if (slot.stats.n_draft_tokens > 0) {
+                metrics.n_draft_verif_steps++;
+            }
+        }
 
         queue_results.send(std::move(res));
     }
@@ -1571,6 +1689,26 @@ void strata_context::init_routes(server_http_context & http) {
         return res;
     };
 
+    auto get_slots = [I](const server_http_req &) {
+        auto res = I->create_response();
+        res->ok(json::array({ I->snapshot_slot_json() }));
+        return res;
+    };
+
+    auto get_metrics = [I](const server_http_req &) {
+        auto res = I->create_response();
+        auto snap = I->snapshot_metrics(true);
+        server_task_result_metrics tmp;
+        tmp.metrics            = std::move(snap.metrics);
+        tmp.n_processing_slots = snap.n_processing;
+        tmp.n_tasks_deferred   = (int) I->queue_tasks.queue_tasks_deferred_size();
+        res->headers["Process-Start-Time-Unix"] = std::to_string(tmp.metrics.t_start);
+        res->content_type = "text/plain; version=0.0.4";
+        res->status       = 200;
+        res->data         = tmp.to_metrics();
+        return res;
+    };
+
     auto get_models = [I](const server_http_req &) {
         auto res = I->create_response();
         res->ok(json {
@@ -1722,6 +1860,8 @@ void strata_context::init_routes(server_http_context & http) {
     http.get ("/health",              ex_wrapper(get_health));
     http.get ("/v1/health",           ex_wrapper(get_health));
     http.get ("/props",               ex_wrapper(get_props));
+    http.get ("/slots",               ex_wrapper(get_slots));
+    http.get ("/metrics",             ex_wrapper(get_metrics));
     http.get ("/models",              ex_wrapper(get_models));
     http.get ("/v1/models",           ex_wrapper(get_models));
     http.post("/completion",          ex_wrapper(post_completions));

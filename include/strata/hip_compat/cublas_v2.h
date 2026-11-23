@@ -56,7 +56,11 @@ inline rocblas_status cublasGemmStridedBatchedEx(rocblas_handle h, rocblas_opera
 }
 #else
 #define CUBLAS_COMPUTE_32F HIPBLAS_COMPUTE_32F
+#define CUBLAS_COMPUTE_32F_FAST_TF32 HIPBLAS_COMPUTE_32F
+#define CUBLAS_COMPUTE_32F_PEDANTIC HIPBLAS_COMPUTE_32F
+#define cublasComputeType_t hipblasComputeType_t
 #define CUBLAS_DEFAULT_MATH HIPBLAS_DEFAULT_MATH
+#define CUBLAS_PEDANTIC_MATH HIPBLAS_DEFAULT_MATH
 #define CUBLAS_GEMM_DEFAULT HIPBLAS_GEMM_DEFAULT
 #define CUBLAS_GEMM_DEFAULT_TENSOR_OP HIPBLAS_GEMM_DEFAULT
 #define CUBLAS_OP_N HIPBLAS_OP_N
@@ -65,10 +69,12 @@ inline rocblas_status cublasGemmStridedBatchedEx(rocblas_handle h, rocblas_opera
 #define CUDA_R_16BF HIP_R_16BF
 #define CUDA_R_16F HIP_R_16F
 #define CUDA_R_32F HIP_R_32F
+#define cudaDataType hipDataType
 #define cublasCreate hipblasCreate
 #define cublasDestroy hipblasDestroy
 #define cublasGemmEx hipblasGemmEx
-#define cublasSgemm hipblasSgemm                              // the Qwen3.6 engine's FP32 prompt products
+#define cublasSgemm hipblasSgemm
+#define cublasSgemv hipblasSgemv                              // the Qwen3.6 engine's FP32 prompt products
 #define cublasSgemmStridedBatched hipblasSgemmStridedBatched
 #define cublasGemmStridedBatchedEx hipblasGemmStridedBatchedEx    // (the Qwen3.6 prompt attention, FP16)
 #define cublasHandle_t hipblasHandle_t

@@ -10,6 +10,9 @@
 #endif
 #endif
 #include <hip/hip_runtime.h>
+#ifndef __grid_constant__
+#define __grid_constant__
+#endif
 #include <hip/hip_version.h>
 // Do not let HIP's legacy macro corrupt libstdc++ attribute names.
 #ifdef __noinline__
@@ -145,6 +148,7 @@ inline hipError_t mem_get_info(size_t* free_bytes, size_t* total_bytes) {
 #define cudaMemcpyPeer hipMemcpyPeer
 #define cudaMemcpyDefault hipMemcpyDefault
 #define cudaMemcpyDeviceToDevice hipMemcpyDeviceToDevice
+#define cudaMemcpyKind hipMemcpyKind
 #define cudaMemcpyDeviceToHost hipMemcpyDeviceToHost
 #define cudaMemcpyHostToDevice hipMemcpyHostToDevice
 #define cudaMemset hipMemset
@@ -189,5 +193,18 @@ inline hipError_t cudaGraphInstantiate(hipGraphExec_t* exec, hipGraph_t graph,
 #define __trap() __builtin_trap()   // the compiled-out sm_80 paths (never selected on AMD)
 #define cudaMemcpyToSymbol(symbol, ...) hipMemcpyToSymbol(HIP_SYMBOL(symbol), __VA_ARGS__)
 #define cudaMemcpyFromSymbol(dst, symbol, ...) hipMemcpyFromSymbol(dst, HIP_SYMBOL(symbol), __VA_ARGS__)
+
+#define cudaDevAttrMemoryClockRate hipDeviceAttributeMemoryClockRate
+#define cudaDevAttrGlobalMemoryBusWidth hipDeviceAttributeMemoryBusWidth
+#define cudaDevAttrCanUseHostPointerForRegisteredMem hipDeviceAttributeCanUseHostPointerForRegisteredMem
+#define cudaDevAttrConcurrentManagedAccess hipDeviceAttributeConcurrentManagedAccess
+#define cudaDeviceGetPCIBusId hipDeviceGetPCIBusId
+#define cudaDeviceGetStreamPriorityRange hipDeviceGetStreamPriorityRange
+#define cudaSetDeviceFlags hipSetDeviceFlags
+#define cudaDeviceScheduleBlockingSync hipDeviceScheduleBlockingSync
+#define cudaOccupancyMaxActiveBlocksPerMultiprocessor hipOccupancyMaxActiveBlocksPerMultiprocessor
+#define cudaErrorUnknown hipErrorUnknown
+#define cudaErrorInvalidConfiguration hipErrorInvalidConfiguration
+#define cudaStreamLegacy hipStreamLegacy
 
 #include "intrinsics.hpp"

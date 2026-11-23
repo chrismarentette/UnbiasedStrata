@@ -126,6 +126,17 @@ int main(int argc, char ** argv) {
             mmproj_gpu = true;
             continue;
         }
+        if (a == "--drafting") {
+            if (i + 1 >= argc) { usage(); return 2; }
+            engine_args.push_back("--drafting");
+            engine_args.push_back(argv[++i]);
+            continue;
+        }
+        if (a.rfind("--drafting=", 0) == 0) {
+            engine_args.push_back("--drafting");
+            engine_args.push_back(a.substr(11));
+            continue;
+        }
         if (a == "--picture-cache") {
             if (i + 1 >= argc) { usage(); return 2; }
             picture_cache = std::strtol(argv[++i], nullptr, 10);

@@ -8,6 +8,63 @@ mtmd code. Qwen3.8-Flash-Next and Qwen3.6-35B-A3B are by the Qwen team; the IQ3_
 MIT License ([LICENSE](LICENSE)); some parts and every model have their own licenses
 ([which ones](docs/HOW_IT_WORKS.md#license)).
 
+## AMD ROCm / HIP Fork (Strix Halo `gfx1151`, RDNA 3 / 3.5 / 4)
+
+This fork extends **[robertkarl/UnbiasedStrata](https://github.com/robertkarl/UnbiasedStrata)** (`UnbiasedStrata 2`) with a tested Linux AMD ROCm/HIP build for unified-memory APUs (**Strix Halo / Radeon 8060S `gfx1151`**) and discrete RDNA 3 / 4 GPUs (`gfx1100`, `gfx1201`), covering both **`strata`** (`Qwen3.8-Flash-Next` + MTP + vision) and **`strata-ik2`** (`Inkling-2-Mini` + RDNA WMMA + `--drafting` pass-through).
+
+### Additional Upstream Credits (HIP & `maya-ik2`)
+
+- **[robertkarl/UnbiasedStrata](https://github.com/robertkarl/UnbiasedStrata)** & **[robertkarl/llama.cpp](https://github.com/robertkarl/llama.cpp)** — base pure-C++ `unbiased-strata` front end, submodule layout, and unconstrained tool-call parser fixes
+- **[alesha-pro/maya-inkling-mini](https://github.com/alesha-pro/maya-inkling-mini)** (Project Maya) & **[PR #7 (`DeseretSaint/hip-build-amd` by Keaton Brumley)](https://github.com/alesha-pro/maya-inkling-mini/pull/7)** — `maya-ik2` Inkling 2 Mini engine (`src/ik2/`), RDNA 3/3.5/4 WMMA kernels (`include/strata/kernels/rdna_wmma.hpp`, `src/ik2/ik2_rdna.inc`), CPU parity lanes (`src/ik2/compat/{ds4,hy4,mm3}`), and AMD HIP bring-up
+- **[Niko1221/Strata](https://github.com/Niko1221/Strata)** — Strata engine architecture and `include/strata/hip_compat/` translation layer
+- **[VecSzn/PolyStrata](https://github.com/VecSzn/PolyStrata)** & **[ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp)** — `strata` / `strata-poly` / `strata_kq` engines, offline tools, `ggml`, `common`, `mtmd`, and `tools/server`
+
+### Build on Linux AMD ROCm / TheRock
+
+```bash
+git clone https://github.com/chrismarentette/UnbiasedStrata && cd UnbiasedStrata
+git submodule update --init --depth 1
+
+# Build strata + strata-poly + unbiased-strata (e.g. for Qwen3.8-Flash-Next)
+make strata-hip AMDGPU_TARGETS=gfx1151 ROCM_PATH=/opt/rocm
+
+# Build strata-ik2 + unbiased-strata (Inkling-2-Mini with RDNA WMMA + CPU lanes)
+make ik2-hip AMDGPU_TARGETS=gfx1151 ROCM_PATH=/opt/rocm
+
+# Or build both:
+make hip AMDGPU_TARGETS=gfx1151 ROCM_PATH=/opt/rocm
+```
+
+> **ROCm / Ubuntu 26.04 note:** On distros where system `apt` `librocwmma-dev` headers conflict with your ROCm toolchain, point `ROCM_PATH` at a self-contained ROCm / [TheRock](https://github.com/ROCm/TheRock) prefix (e.g. `ROCM_PATH=$HOME/rocm/install`) and prepend its `lib` directories to `LD_LIBRARY_PATH`.
+
+### Run on Strix Halo (`gfx1151`, 128 GB UMA)
+
+**Qwen3.8-Flash-Next (`UD-Q4_K_XL` pack + MTP runtime + vision):**
+
+```bash
+STRATA_HIP_WMMA=1 STRATA_PF_FUSED=1 STRATA_SPEC_COUPLED=1 \
+  build-hip/bin/unbiased-strata --engine build-hip/bin/strata \
+  -m /models/Qwen3.8-Flash-Next-UD-Q4_K_XL.gguf --mmproj /models/mmproj-BF16.gguf \
+  --host 127.0.0.1 --port 8080 --alias qwen3.8-flash-next \
+  -- --pack /models/qfn-ud-q4kxl --native /models/Qwen3.8-Flash-Next-UD-Q4_K_XL.gguf \
+     --vision --mmap-experts --expert-cache 24576 --vram-reserve-mib 8192 \
+     --max-context 131072 --kv int8 \
+     --mtp-dir /models/qfn-mtp-rt --mtp-hnorm stream --mtp-q4 all --mtp-window 8192 \
+     --spec 4 --spec-min-p 0.5 --lookup-chain 3
+```
+
+**Inkling-2-Mini (`UD-Q4_K_XL` + built-in DSpark drafter):**
+
+```bash
+build-hip-ik2/bin/unbiased-strata --engine build-hip-ik2/bin/strata-ik2 \
+  -m /models/Inkling-2-Mini-UD-Q4_K_XL.gguf --mmproj /models/mmproj-F16.gguf \
+  --host 127.0.0.1 --port 8080 --alias inkling-2-mini --drafting 4 \
+  -- --model /models/Inkling-2-Mini-UD-Q4_K_XL.gguf --max-context 65536 \
+     --dspark /models/dspark-Inkling-2-Mini-Q8_0.gguf
+```
+
+---
+
 # UnbiasedStrata 2 - note from a human.
 
 

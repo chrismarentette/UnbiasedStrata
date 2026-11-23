@@ -74,6 +74,46 @@ inkling: configure
 	cmake --build $(BUILD_DIR) -j $(JOBS) --target strata-ik2 unbiased-strata
 endif
 
+# AMD ROCm/HIP targets (RDNA 3 / 3.5 / 4). Override ROCM_PATH if ROCm / TheRock lives outside /opt/rocm.
+AMDGPU_TARGETS    ?= gfx1100;gfx1151;gfx1201
+ROCM_PATH         ?= $(firstword $(wildcard /opt/rocm $(HOME)/rocm/install))
+HIP_CXX           ?= $(firstword $(wildcard $(ROCM_PATH)/bin/amdclang++ $(ROCM_PATH)/llvm/bin/clang++ $(shell command -v clang++ 2>/dev/null)))
+HIP_BUILD_DIR     ?= build-hip-ik2
+HIP_STRATA_DIR    ?= build-hip
+.PHONY: hip strata-hip ik2-hip
+
+hip: strata-hip ik2-hip
+
+strata-hip:
+	@test -f third_party/llama.cpp/ggml/CMakeLists.txt || \
+	  { echo "third_party/llama.cpp is empty: run 'git submodule update --init' first"; exit 1; }
+	@test -n "$(ROCM_PATH)" && test -x "$(HIP_CXX)" || \
+	  { echo "ROCm C++/HIP compiler not found; set ROCM_PATH=/path/to/rocm"; exit 1; }
+	cmake -S . -B $(HIP_STRATA_DIR) -DCMAKE_BUILD_TYPE=Release \
+	      -DSTRATA_ENABLE_CUDA=OFF -DSTRATA_ENABLE_HIP=ON -DSTRATA_BUILD_IK2=OFF \
+	      -DSTRATA_PREFILL_MMQ=ON -DSTRATA_NATIVE_EXPERTS=ON -DSTRATA_MMQ_KQUANTS=ON -DSTRATA_Q6K_EXPERTS=ON \
+	      -DSTRATA_BUILD_DSV41=OFF -DSTRATA_BUILD_TESTS=OFF \
+	      -DCMAKE_PREFIX_PATH="$(ROCM_PATH)" -DCMAKE_CXX_COMPILER="$(HIP_CXX)" -DCMAKE_HIP_COMPILER="$(HIP_CXX)" \
+	      -DCMAKE_HIP_ARCHITECTURES="$(AMDGPU_TARGETS)" \
+	      -DCMAKE_RUNTIME_OUTPUT_DIRECTORY=$(abspath $(HIP_STRATA_DIR))/bin \
+	      -DCMAKE_LIBRARY_OUTPUT_DIRECTORY=$(abspath $(HIP_STRATA_DIR))/bin $(CMAKE_EXTRA)
+	cmake --build $(HIP_STRATA_DIR) -j $(JOBS) --target strata strata-poly unbiased-strata
+
+# Inkling 2 Mini on AMD HIP (RDNA 3 / 3.5 / 4). Override ROCM_PATH if ROCm lives outside /opt/rocm.
+ik2-hip:
+	@test -f third_party/llama.cpp/ggml/CMakeLists.txt || \
+	  { echo "third_party/llama.cpp is empty: run 'git submodule update --init' first"; exit 1; }
+	@test -n "$(ROCM_PATH)" && test -x "$(HIP_CXX)" || \
+	  { echo "ROCm C++/HIP compiler not found; set ROCM_PATH=/path/to/rocm"; exit 1; }
+	cmake -S . -B $(HIP_BUILD_DIR) -DCMAKE_BUILD_TYPE=Release \
+	      -DSTRATA_ENABLE_CUDA=OFF -DSTRATA_ENABLE_HIP=ON -DSTRATA_BUILD_IK2=ON \
+	      -DSTRATA_BUILD_DSV41=OFF -DSTRATA_BUILD_TESTS=OFF \
+	      -DCMAKE_PREFIX_PATH="$(ROCM_PATH)" -DCMAKE_CXX_COMPILER="$(HIP_CXX)" -DCMAKE_HIP_COMPILER="$(HIP_CXX)" \
+	      -DCMAKE_HIP_ARCHITECTURES="$(AMDGPU_TARGETS)" \
+	      -DCMAKE_RUNTIME_OUTPUT_DIRECTORY=$(abspath $(HIP_BUILD_DIR))/bin \
+	      -DCMAKE_LIBRARY_OUTPUT_DIRECTORY=$(abspath $(HIP_BUILD_DIR))/bin $(CMAKE_EXTRA)
+	cmake --build $(HIP_BUILD_DIR) -j $(JOBS) --target strata-ik2 unbiased-strata
+
 build: configure
 	cmake --build $(BUILD_DIR) -j $(JOBS) --target $(TARGETS)
 	@echo "built:"; ls -1 $(BUILD_DIR)/bin/strata $(BUILD_DIR)/bin/strata-poly $(BUILD_DIR)/bin/strata-dsv41 $(BUILD_DIR)/bin/libstrata_kq.so $(BUILD_DIR)/bin/unbiased-strata

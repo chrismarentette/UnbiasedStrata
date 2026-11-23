@@ -217,3 +217,21 @@ Each entry names the rule above that it satisfies.
   record, not source; the numbers that matter are in `README.md` "Measured", and the directories are in history at
   7551f138. `bench/` keeps what is reusable: `bench_vs_llama.py` with `profile_corpus.json`, the kernel probes, and
   `bench/correctness/` (the step-12 harness, moved from `bench/unbiased/correctness/scripts/`).
+
+## AMD ROCm / HIP Port (`feat/amd-gfx1151-ik2` / Strix Halo `gfx1151`)
+
+Built on top of `robertkarl/UnbiasedStrata` commit `9f75192`:
+
+- **`alesha-pro/maya-inkling-mini` + PR #7 (`DeseretSaint/hip-build-amd`, Keaton Brumley) & `Niko1221/Strata`:**
+  Added RDNA 3 / 3.5 / 4 WMMA expert kernels (`include/strata/kernels/rdna_wmma.hpp`, `src/ik2/ik2_rdna.inc`),
+  HIP compilation rules (`src/ik2/CMakeLists.txt`), CPU lane parity / GGUF helpers (`src/ik2/ik2_exact.h`,
+  `src/ik2/ik2_lane.{hpp,cpp}`, `src/ik2/ik2_off.{cuh,cu}`, `src/ik2/compat/{ds4,hy4,mm3}`), CPU quant row helpers
+  (`include/strata/kernels/cpu/{exl3_cpu,iq2v_rows,iq3v_rows}.hpp`), platform probes
+  (`include/strata/platform/{commit,dedicated}.hpp`), and `data/expert-profile-ik2mini.bin`.
+- **HIP Compatibility Layer & Build (`cmake/hip_backend.cmake`, `CMakeLists.txt`, `Makefile`, `include/strata/hip_compat/`):**
+  - Promoted `gfx1151` (Radeon 8060S / Strix Halo) in `cmake/hip_backend.cmake`.
+  - Allowed `STRATA_BUILD_IK2` when `STRATA_ENABLE_HIP` is enabled on non-Windows hosts (`CMakeLists.txt`).
+  - Added `cuda_bf16.h`, `cuda_profiler_api.h`, and missing CUDA-to-HIP symbol mappings in `cublas_v2.h` and `cuda_runtime.h` (`__grid_constant__`, `CUBLAS_COMPUTE_32F_FAST_TF32`, `cublasComputeType_t`, `cudaDataType`, `cublasSgemv`, `cudaMemcpyKind`, device attribute/stream aliases).
+  - Added `make strata-hip`, `make ik2-hip`, and `make hip` targets to `Makefile` with auto-detection for `/opt/rocm` and `$(HOME)/rocm/install`.
+- **Front End (`frontend/main.cpp`):**
+  Forwarded `--drafting <n>` / `--drafting=<n>` through `unbiased-strata` to `strata-ik2`.

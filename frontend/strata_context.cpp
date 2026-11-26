@@ -239,6 +239,13 @@ struct strata_context_impl {
         bool     has_new_line              = false;
         uint64_t last_kv_tokens            = 0;
         uint64_t last_cache_tokens         = 0;
+        // Live /metrics accounting (prevents zero-then-spike jumps during prefill & decode)
+        uint64_t prompt_metrics_accounted  = 0;
+        uint64_t prompt_cached_accounted   = 0;
+        int64_t  prompt_metrics_last_us    = 0;
+        uint64_t gen_metrics_accounted     = 0;
+        int64_t  gen_metrics_last_us       = 0;
+        int64_t  last_pp_log_us            = 0;
     };
     mutable std::mutex telemetry_mtx;
     TelemetrySnap telemetry;
@@ -446,6 +453,12 @@ struct strata_context_impl {
             telemetry.n_remain                  = slot.n_predict;
             telemetry.has_next_token            = true;
             telemetry.has_new_line              = false;
+            telemetry.prompt_metrics_accounted  = 0;
+            telemetry.prompt_cached_accounted   = 0;
+            telemetry.prompt_metrics_last_us    = ggml_time_us();
+            telemetry.gen_metrics_accounted     = 0;
+            telemetry.gen_metrics_last_us       = 0;
+            telemetry.last_pp_log_us            = 0;
         }
         SRV_INF("task %d: %s prompt=%d n_predict=%d\n", t.id, header.c_str(), n_prompt, slot.n_predict);
 
@@ -788,15 +801,61 @@ struct strata_context_impl {
                     if (cached > telemetry.n_prompt_tokens_processed) {
                         telemetry.n_prompt_tokens_processed = cached;
                     }
+                    if (cached > telemetry.prompt_cached_accounted) {
+                        metrics.add_prompt_cached(cached - telemetry.prompt_cached_accounted);
+                        telemetry.prompt_cached_accounted = cached;
+                    }
+                    telemetry.prompt_metrics_last_us = ggml_time_us();
+                }
+                if (line.n > 0 && slot.task) {
+                    const uint64_t total = (uint64_t) slot.task->n_tokens();
+                    const uint64_t cached = (uint64_t) std::max<long long>(0, line.n);
+                    SRV_INF("slot 0: task %d: prompt cache hit %llu/%llu tokens (fresh=%llu)\n",
+                            slot.task->id, (unsigned long long) cached, (unsigned long long) total,
+                            (unsigned long long) (total > cached ? total - cached : 0));
                 }
                 break;
 
             case EngineLine::PP:
                 {
-                    std::lock_guard<std::mutex> lk(telemetry_mtx);
-                    const uint64_t done = (uint64_t) std::max<long long>(0, line.pp_done);
-                    if (done > telemetry.n_prompt_tokens_processed) {
-                        telemetry.n_prompt_tokens_processed = done;
+                    bool log_pp = false;
+                    uint64_t log_done = 0, log_total = 0, log_fresh = 0;
+                    double log_tps = 0.0;
+                    {
+                        std::lock_guard<std::mutex> lk(telemetry_mtx);
+                        const int64_t now_us = ggml_time_us();
+                        uint64_t done = (uint64_t) std::max<long long>(0, line.pp_done);
+                        if (telemetry.n_prompt_tokens > 0 && done > telemetry.n_prompt_tokens) {
+                            done = telemetry.n_prompt_tokens;
+                        }
+                        if (done > telemetry.n_prompt_tokens_processed) {
+                            telemetry.n_prompt_tokens_processed = done;
+                        }
+                        const uint64_t fresh = done > telemetry.n_prompt_tokens_cache
+                            ? (done - telemetry.n_prompt_tokens_cache) : 0;
+                        if (fresh > telemetry.prompt_metrics_accounted) {
+                            const uint64_t dtok = fresh - telemetry.prompt_metrics_accounted;
+                            const int64_t  dus  = now_us > telemetry.prompt_metrics_last_us
+                                ? (now_us - telemetry.prompt_metrics_last_us) : 1;
+                            metrics.add_prompt(dtok, (uint64_t) dus);
+                            telemetry.prompt_metrics_accounted = fresh;
+                            telemetry.prompt_metrics_last_us   = now_us;
+                            if (telemetry.last_pp_log_us == 0 || (now_us - telemetry.last_pp_log_us) >= 2000000 ||
+                                (telemetry.n_prompt_tokens > 0 && done >= telemetry.n_prompt_tokens)) {
+                                telemetry.last_pp_log_us = now_us;
+                                log_pp    = true;
+                                log_done  = done;
+                                log_total = telemetry.n_prompt_tokens;
+                                log_fresh = fresh;
+                                log_tps   = dus > 0 ? (double) dtok * 1e6 / (double) dus : 0.0;
+                            }
+                        }
+                    }
+                    if (log_pp && slot.task && log_total > 0) {
+                        SRV_INF("slot 0: task %d: prompt eval progress %llu/%llu (%.1f%%, fresh=%llu, %.1f tok/s)\n",
+                                slot.task->id, (unsigned long long) log_done, (unsigned long long) log_total,
+                                100.0 * (double) log_done / (double) log_total,
+                                (unsigned long long) log_fresh, log_tps);
                     }
                 }
                 if (!slot.cancelled && slot.task->params.stream && slot.task->params.return_progress) {
@@ -851,11 +910,33 @@ struct strata_context_impl {
         slot.stats.update_gen_last();
         {
             std::lock_guard<std::mutex> lk(telemetry_mtx);
+            const int64_t now_us = ggml_time_us();
+            // Flush any remaining fresh prompt tokens into /metrics on first generated token
+            const uint64_t fresh_total = telemetry.n_prompt_tokens > telemetry.n_prompt_tokens_cache
+                ? (telemetry.n_prompt_tokens - telemetry.n_prompt_tokens_cache) : 0;
+            if (fresh_total > telemetry.prompt_metrics_accounted) {
+                const uint64_t dtok = fresh_total - telemetry.prompt_metrics_accounted;
+                const int64_t  dus  = now_us > telemetry.prompt_metrics_last_us
+                    ? (now_us - telemetry.prompt_metrics_last_us) : 1;
+                metrics.add_prompt(dtok, (uint64_t) dus);
+                telemetry.prompt_metrics_accounted = fresh_total;
+                telemetry.prompt_metrics_last_us   = now_us;
+            }
             telemetry.n_prompt_tokens_processed = telemetry.n_prompt_tokens;
             telemetry.n_generated_tokens        = slot.stats.n_gen;
             telemetry.n_remain = slot.n_predict >= 0
                 ? std::max<int32_t>(0, slot.n_predict - (int32_t) slot.stats.n_gen)
                 : -1;
+            // Credit generated tokens live into /metrics so curves & gauges move smoothly during decode
+            if (slot.stats.n_gen > telemetry.gen_metrics_accounted) {
+                const uint64_t dgen = slot.stats.n_gen - telemetry.gen_metrics_accounted;
+                const int64_t  ref  = telemetry.gen_metrics_last_us > 0 ? telemetry.gen_metrics_last_us : now_us;
+                const uint64_t dus  = (uint64_t) std::max<int64_t>(1, now_us - ref);
+                metrics.predict.add(dgen, dgen, dus);
+                metrics.predict_bucket.add(dgen, dgen, dus);
+                telemetry.gen_metrics_accounted = slot.stats.n_gen;
+                telemetry.gen_metrics_last_us   = now_us;
+            }
             metrics.n_decode++;
             metrics.n_busy_slots++;
         }
@@ -929,6 +1010,17 @@ struct strata_context_impl {
         // the engine's own clock: prompt and decode times as it measured them
         SRV_INF("task %d: DONE produced=%lld prompt=%lld prompt_ms=%.1f decode_ms=%.1f finish=%s drafts=%lld/%lld reused=%lld\n",
                 t.id, d.produced, d.prompt_n, d.prompt_ms, d.decode_ms, d.finish.c_str(), d.draft_accepted, d.draft_offered, d.reused);
+        {
+            const long long fresh_n = std::max<long long>(0, d.prompt_n - d.reused);
+            const double pp_ms_tok  = fresh_n > 0 ? d.prompt_ms / (double) fresh_n : 0.0;
+            const double pp_tps     = d.prompt_ms > 0.0 ? (double) fresh_n * 1e3 / d.prompt_ms : 0.0;
+            const double tg_ms_tok  = d.produced > 0 ? d.decode_ms / (double) d.produced : 0.0;
+            const double tg_tps     = d.decode_ms > 0.0 ? (double) d.produced * 1e3 / d.decode_ms : 0.0;
+            SRV_INF("slot 0: task %d: prompt eval time = %9.2f ms / %6lld tokens (%6.2f ms/tok, %7.2f tok/s) [cached=%lld]\n",
+                    t.id, d.prompt_ms, fresh_n, pp_ms_tok, pp_tps, d.reused);
+            SRV_INF("slot 0: task %d:        eval time = %9.2f ms / %6lld tokens (%6.2f ms/tok, %7.2f tok/s)\n",
+                    t.id, d.decode_ms, d.produced, tg_ms_tok, tg_tps);
+        }
 
         if (d.prompt_n != (long long) t.n_tokens()) {
             // the engine answered for another prompt: never pass that off as this request's reply
@@ -1072,13 +1164,28 @@ struct strata_context_impl {
 
         res->generation_params = t.params;
 
-        // cumulative server metrics
+        // cumulative server metrics (reconcile only what was not already credited live)
         {
             std::lock_guard<std::mutex> lk(telemetry_mtx);
-            metrics.add_prompt(slot.stats.n_prompt_processed, (uint64_t) std::max<double>(0, slot.stats.t_prompt_ms() * 1000));
-            metrics.add_prompt_cached(slot.stats.n_prompt_cached);
-            metrics.predict.add(slot.stats.n_gen, slot.stats.n_gen_steps(), (uint64_t) slot.stats.t_gen_us());
-            metrics.predict_bucket.add(slot.stats.n_gen, slot.stats.n_gen_steps(), (uint64_t) slot.stats.t_gen_us());
+            const int64_t now_us = ggml_time_us();
+            if (slot.stats.n_prompt_processed > telemetry.prompt_metrics_accounted) {
+                const uint64_t rem = slot.stats.n_prompt_processed - telemetry.prompt_metrics_accounted;
+                const uint64_t dus = (uint64_t) std::max<int64_t>(1, now_us - telemetry.prompt_metrics_last_us);
+                metrics.add_prompt(rem, dus);
+                telemetry.prompt_metrics_accounted = slot.stats.n_prompt_processed;
+            }
+            if (slot.stats.n_prompt_cached > telemetry.prompt_cached_accounted) {
+                metrics.add_prompt_cached(slot.stats.n_prompt_cached - telemetry.prompt_cached_accounted);
+                telemetry.prompt_cached_accounted = slot.stats.n_prompt_cached;
+            }
+            if (slot.stats.n_gen > telemetry.gen_metrics_accounted) {
+                const uint64_t rem = slot.stats.n_gen - telemetry.gen_metrics_accounted;
+                const int64_t  ref = telemetry.gen_metrics_last_us > 0 ? telemetry.gen_metrics_last_us : now_us;
+                const uint64_t dus = (uint64_t) std::max<int64_t>(1, now_us - ref);
+                metrics.predict.add(rem, rem, dus);
+                metrics.predict_bucket.add(rem, rem, dus);
+                telemetry.gen_metrics_accounted = slot.stats.n_gen;
+            }
             metrics.n_tokens_max = std::max<uint64_t>(metrics.n_tokens_max, (uint64_t) t.n_tokens() + slot.stats.n_gen);
             metrics.n_draft_tokens   += slot.stats.n_draft_tokens;
             metrics.n_draft_accepted += slot.stats.n_draft_accepted;

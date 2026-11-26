@@ -9046,6 +9046,9 @@ int main(int argc, char** argv) {
         // failed): a request cancelled here keeps them as the live conversation instead of dropping what it restored
         bool pp_exact = false;
         Clock::time_point pp_t0 = Clock::now();
+        std::mutex pp_out_mu;
+        int64_t pp_emit_hi = 0;
+        Clock::time_point pp_last_sub = Clock::now();
         // #879: this request met a window whose head logits were not all finite (nonfinite_hit): it ends with
         // DONE ... nonfinite, emitting none of that window's tokens
         bool nf_hit = false;
@@ -9262,6 +9265,22 @@ int main(int argc, char** argv) {
         // runs there, on the Prefill that ran the chunk, instead of the drafter's own per-8-row pass.  The drafts' K/V
         // come from Q8_1 x Q8_0 MMQ rather than mmvq: drafts may differ, the target's tokens never.
         static const bool split_mtp_batch = strata::program::draft_kv::split_env_on(std::getenv("STRATA_SPLIT_MTP_BATCH"));
+        sp.on_layer_progress = [&](int64_t p0, int64_t T, int64_t layer_done, int64_t total_layers) {
+            if (T <= 1 || total_layers <= 0) return;
+            const auto now = Clock::now();
+            std::lock_guard<std::mutex> lk(pp_out_mu);
+            if (std::chrono::duration<double, std::milli>(now - pp_last_sub).count() < 350.0) return;
+            const int64_t frac = std::min<int64_t>(T - 1, std::max<int64_t>(1, (T * layer_done) / total_layers));
+            const int64_t est  = std::min<int64_t>(pp_total, p0 + frac);
+            if (est <= pp_emit_hi) return;
+            pp_emit_hi  = est;
+            pp_last_sub = now;
+            const double ms = std::chrono::duration<double, std::milli>(now - pp_t0).count();
+            std::printf("PP %lld %lld %.0f %.1f\n", (long long) est, (long long) pp_total, ms,
+                        ms > 0.0 ? 1000.0 * (double) (est - pp_from) / ms : 0.0);
+            std::fflush(stdout);
+            strata::core::progress_beat();
+        };
         sp.on_chunk = [&](const float* R_rows, int64_t T, int64_t p0, std::string& e) -> bool {
             std::vector<int32_t> nxt((size_t) T);
             for (int64_t t = 0; t < T; ++t) nxt[(size_t) t] = (int32_t) cur[(size_t) (p0 + t + 1)];
@@ -9293,12 +9312,17 @@ int main(int argc, char** argv) {
             // progress for the server window: PP <position reached> <prompt tokens> <ms> <fresh tokens/s>
             const int64_t done = p0 + T;
             pp_reached = done;
-            const double ms = std::chrono::duration<double, std::milli>(Clock::now() - pp_t0).count();
-            std::printf("PP %lld %lld %.0f %.1f\n", (long long) done, (long long) pp_total, ms,
-                        ms > 0.0 ? 1000.0 * (double) (done - pp_from) / ms : 0.0);
+            {
+                std::lock_guard<std::mutex> lk(pp_out_mu);
+                if (done > pp_emit_hi) pp_emit_hi = done;
+                pp_last_sub = Clock::now();
+                const double ms = std::chrono::duration<double, std::milli>(pp_last_sub - pp_t0).count();
+                std::printf("PP %lld %lld %.0f %.1f\n", (long long) done, (long long) pp_total, ms,
+                            ms > 0.0 ? 1000.0 * (double) (done - pp_from) / ms : 0.0);
+                std::fflush(stdout);
+            }
             strata::core::progress_at("reading the prompt (batched), done up to token", done);
             strata::core::progress_beat();
-            std::fflush(stdout);
             const bool periodic_checkpoint = o.prompt_cache_every > 0 && done >= pp_next_check;
             // Keep the prefill's existing chunk geometry. One extra near-tail checkpoint
             // can serve a branch whose shared prefix ends before the final cached state.
@@ -12373,6 +12397,11 @@ int main(int argc, char** argv) {
             pp_reached = read_from;
             pp_exact = true;   // a restore, a checkpoint mount or a zeroed session: the state is exactly at read_from
             pp_t0 = r0;
+            {
+                std::lock_guard<std::mutex> lk(pp_out_mu);
+                pp_emit_hi  = read_from;
+                pp_last_sub = r0;
+            }
             pp_next_check = reread_to > 0 || !req_ckpt ? INT64_MAX : resume + o.prompt_cache_every;   // ckpt=0: none
             pp_tail_saved = reread_to > 0 || !req_ckpt;   // ckpt=0 (#861): no tail checkpoint either
             {

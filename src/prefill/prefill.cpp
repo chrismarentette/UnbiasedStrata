@@ -2869,6 +2869,18 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                 std::fprintf(stderr, "strata pf-step: chunk from token %lld, layer %lld: %s took %.0f ms (%s / %s)\n",
                              (long long) p0, (long long) layer, what, ms, cudaGetErrorString(a), cudaGetErrorString(b));
         };
+        struct LayerTick {
+            const Prefill* self;
+            int64_t p0, T, done, total;
+        };
+        const bool layer_ticks_on = on_layer_progress && next_ == nullptr && T >= 256 && (LE - LB) > 1;
+        std::vector<LayerTick> layer_ticks(layer_ticks_on ? (size_t) (LE - LB) : 0);
+        // Ensure any queued host callbacks finish before layer_ticks destructs, even on early error return.
+        struct LayerTickGuard {
+            cudaStream_t cs = nullptr;
+            bool armed = false;
+            ~LayerTickGuard() { if (armed && cs) (void) cudaStreamSynchronize(cs); }
+        } layer_tick_guard{m.cs, false};
         for (int64_t l = LB; l < LE; ++l) {
             core::progress_beat();   // the serve watchdog: a prompt chunk of 8192 tokens is still moving
             if (l > LB) pf_step("reading the prompt (batched, step sync): the experts and the rest of layer", l - 1);
@@ -4567,6 +4579,20 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                 if (steered && !cv_fused)   // --control-vector-scaled
                     strata::kernels::cvec_apply(m.R, l, T, D, nullptr, 0, nullptr, 0, false, m.cs);
             }
+            if (layer_ticks_on && (l + 1) < LE) {
+                LayerTick& tk = layer_ticks[(size_t) (l - LB)];
+                tk = LayerTick{this, p0, T, (l - LB) + 1, LE - LB};
+                if (cudaLaunchHostFunc(m.cs, [](void* p) {
+                    const auto* t = static_cast<const LayerTick*>(p);
+                    if (t->self->on_layer_progress) {
+                        t->self->on_layer_progress(t->p0, t->T, t->done, t->total);
+                    }
+                }, &tk) == cudaSuccess) {
+                    layer_tick_guard.armed = true;
+                } else {
+                    (void) cudaGetLastError();
+                }
+            }
         }
         if (!ple_land()) return false;   // a stage that ends before layer 1: the rows land anyway, the next gather starts
         if (issuer.joinable()) {
@@ -4669,6 +4695,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                 err = std::string("prefill: ") + cudaGetErrorString(cudaGetLastError());
                 return false;
             }
+            layer_tick_guard.armed = false;
             const auto toc2 = Clock::now();
             if (on_stage_chunk && !on_stage_chunk(p0 + T, err)) return false;
             if (on_chunk && !on_chunk(m.R, T, p0, err)) return false;

@@ -12,7 +12,7 @@ MIT License ([LICENSE](LICENSE)); some parts and every model have their own lice
 
 This fork extends **[robertkarl/UnbiasedStrata](https://github.com/robertkarl/UnbiasedStrata)** (`UnbiasedStrata 2`) with a tested Linux AMD ROCm/HIP build for unified-memory APUs (**Strix Halo / Radeon 8060S `gfx1151`**) and discrete RDNA 3 / 4 GPUs (`gfx1100`, `gfx1201`), covering both **`strata`** (`Qwen3.8-Flash-Next` + MTP + vision) and **`strata-ik2`** (`Inkling-2-Mini` + RDNA WMMA + `--drafting` pass-through).
 
-It also adds `llama.cpp`-compatible `/slots` and `/metrics` endpoints and hardens the unconstrained Qwen3-Coder XML tool-call parser (`third_party/llama.cpp` via `chrismarentette/llama.cpp`) against Python literals (`True`/`False`/`None`), undeclared parameter aliases, and malformed non-string parameter values.
+It also adds `llama.cpp`-compatible `/slots` and `/metrics` endpoints with live sub-chunk prefill progress (non-blocking GPU host callbacks every ~350 ms, live Prometheus token/rate counters, and `llama.cpp`-style `prompt eval time` / `eval time` logs) and hardens the unconstrained Qwen3-Coder XML tool-call parser (`third_party/llama.cpp` via `chrismarentette/llama.cpp`) against Python literals (`True`/`False`/`None`), undeclared parameter aliases, and malformed non-string parameter values.
 
 ### Additional Upstream Credits (HIP & `maya-ik2`)
 
@@ -50,10 +50,12 @@ STRATA_HIP_WMMA=1 STRATA_PF_FUSED=1 STRATA_SPEC_COUPLED=1 \
   --host 127.0.0.1 --port 8080 --alias qwen3.8-flash-next \
   -- --pack /models/qfn-ud-q4kxl --native /models/Qwen3.8-Flash-Next-UD-Q4_K_XL.gguf \
      --vision --mmap-experts --expert-cache 24576 --vram-reserve-mib 8192 \
-     --max-context 131072 --kv int8 \
+     --prefill 16384 --no-prefill-borrow --max-context 131072 --kv int8 \
      --mtp-dir /models/qfn-mtp-rt --mtp-hnorm stream --mtp-q4 all --mtp-window 8192 \
      --spec 4 --spec-min-p 0.5 --lookup-chain 3
 ```
+
+> **128 GB UMA prefill tip:** Passing an explicit `--prefill 16384 --no-prefill-borrow` keeps all 24,576 experts pinned in GPU GTT instead of borrowing ~5.86 GiB of expert slots per prefill chunk, eliminating ~25 GB of expert-refill reads on long cold prefills while leaving ~26+ GiB UMA headroom (note: pairing `--no-prefill-borrow` with `--prefill auto` drops the chunk size to 2048, so pass the chunk size explicitly).
 
 **Inkling-2-Mini (`UD-Q4_K_XL` + built-in DSpark drafter):**
 

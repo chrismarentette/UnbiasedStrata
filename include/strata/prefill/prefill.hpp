@@ -185,6 +185,11 @@ public:
     /// mid-prompt checkpoint takes each stage's part.  Runs on that stage's thread, with its device current.
     std::function<bool(int64_t done, std::string& err)> on_stage_chunk;
 
+    /// Sub-chunk progress: called asynchronously from the GPU host-callback thread as layers finish within a
+    /// chunk (via cudaLaunchHostFunc, no GPU stall), with the chunk start `pos0`, chunk size `T`, completed
+    /// layers `layer_done`, and total layers `total_layers`. Final stage only (`next_ == nullptr`).
+    std::function<void(int64_t pos0, int64_t T, int64_t layer_done, int64_t total_layers)> on_layer_progress;
+
     /// Checked before every chunk: true stops the prompt early (`run` returns false with err "cancelled").
     std::function<bool()> should_stop;
     /// The first stage only, checked before every chunk but the first: true ends the run there as if the prompt

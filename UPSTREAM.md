@@ -235,6 +235,8 @@ Built on top of `robertkarl/UnbiasedStrata` commit `9f75192`:
   - Added `make strata-hip`, `make ik2-hip`, and `make hip` targets to `Makefile` with auto-detection for `/opt/rocm` and `$(HOME)/rocm/install`.
 - **Front End (`frontend/main.cpp`, `frontend/strata_context.cpp`):**
   - Forwarded `--drafting <n>` / `--drafting=<n>` through `unbiased-strata` to `strata-ik2`.
-  - Added `llama.cpp`-compatible `/slots` and `/metrics` telemetry endpoints for live slot and Prometheus monitoring.
+  - Added `llama.cpp`-compatible `/slots` and `/metrics` telemetry endpoints with live mid-request accounting (`prompt_tokens_total`, `prompt_seconds_total`, `tokens_predicted_total`, live `*_tokens_seconds` gauges) and `llama.cpp`-style `prompt eval progress` / `prompt eval time` / `eval time` logging.
+- **Engine Sub-Chunk Prefill Progress (`include/strata/prefill/prefill.hpp`, `src/prefill/prefill.cpp`, `src/program/generate.cpp`):**
+  - Added non-blocking `on_layer_progress` callbacks via `cudaLaunchHostFunc` (`hipLaunchHostFunc`) throttled to ~350 ms so `/slots` and `/metrics` update smoothly during 16k-token prefill chunks with zero GPU stall and unchanged `pp_reached` cancel checkpoints.
 - **Submodule (`third_party/llama.cpp` → `chrismarentette/llama.cpp`, forked from `robertkarl/llama.cpp`):**
   - Healed unconstrained Qwen3-Coder XML tool-call parsing (`common/parsers/qwen3-coder.cpp`, `tests/test-chat.cpp`): accept Python literals (`True`/`False`/`None`, single-quoted strings/containers), accept undeclared/alias `<parameter=...>` tags, and fall back to raw strings on malformed non-string JSON values while keeping strict GBNF generation unchanged.

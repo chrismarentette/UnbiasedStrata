@@ -12,6 +12,8 @@ MIT License ([LICENSE](LICENSE)); some parts and every model have their own lice
 
 This fork extends **[robertkarl/UnbiasedStrata](https://github.com/robertkarl/UnbiasedStrata)** (`UnbiasedStrata 2`) with a tested Linux AMD ROCm/HIP build for unified-memory APUs (**Strix Halo / Radeon 8060S `gfx1151`**) and discrete RDNA 3 / 4 GPUs (`gfx1100`, `gfx1201`), covering both **`strata`** (`Qwen3.8-Flash-Next` + MTP + vision) and **`strata-ik2`** (`Inkling-2-Mini` + RDNA WMMA + `--drafting` pass-through).
 
+It also adds `llama.cpp`-compatible `/slots` and `/metrics` endpoints and hardens the unconstrained Qwen3-Coder XML tool-call parser (`third_party/llama.cpp` via `chrismarentette/llama.cpp`) against Python literals (`True`/`False`/`None`), undeclared parameter aliases, and malformed non-string parameter values.
+
 ### Additional Upstream Credits (HIP & `maya-ik2`)
 
 - **[robertkarl/UnbiasedStrata](https://github.com/robertkarl/UnbiasedStrata)** & **[robertkarl/llama.cpp](https://github.com/robertkarl/llama.cpp)** — base pure-C++ `unbiased-strata` front end, submodule layout, and unconstrained tool-call parser fixes

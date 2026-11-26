@@ -1,5 +1,5 @@
 [submodule "third_party/llama.cpp"]
 	path = third_party/llama.cpp
-	url = https://github.com/robertkarl/llama.cpp.git
-	branch = UnbiasedStrata
+	url = https://github.com/chrismarentette/llama.cpp.git
+	branch = feat/qwen3-coder-unconstrained-healing
 	shallow = true

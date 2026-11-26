@@ -233,5 +233,8 @@ Built on top of `robertkarl/UnbiasedStrata` commit `9f75192`:
   - Allowed `STRATA_BUILD_IK2` when `STRATA_ENABLE_HIP` is enabled on non-Windows hosts (`CMakeLists.txt`).
   - Added `cuda_bf16.h`, `cuda_profiler_api.h`, and missing CUDA-to-HIP symbol mappings in `cublas_v2.h` and `cuda_runtime.h` (`__grid_constant__`, `CUBLAS_COMPUTE_32F_FAST_TF32`, `cublasComputeType_t`, `cudaDataType`, `cublasSgemv`, `cudaMemcpyKind`, device attribute/stream aliases).
   - Added `make strata-hip`, `make ik2-hip`, and `make hip` targets to `Makefile` with auto-detection for `/opt/rocm` and `$(HOME)/rocm/install`.
-- **Front End (`frontend/main.cpp`):**
-  Forwarded `--drafting <n>` / `--drafting=<n>` through `unbiased-strata` to `strata-ik2`.
+- **Front End (`frontend/main.cpp`, `frontend/strata_context.cpp`):**
+  - Forwarded `--drafting <n>` / `--drafting=<n>` through `unbiased-strata` to `strata-ik2`.
+  - Added `llama.cpp`-compatible `/slots` and `/metrics` telemetry endpoints for live slot and Prometheus monitoring.
+- **Submodule (`third_party/llama.cpp` → `chrismarentette/llama.cpp`, forked from `robertkarl/llama.cpp`):**
+  - Healed unconstrained Qwen3-Coder XML tool-call parsing (`common/parsers/qwen3-coder.cpp`, `tests/test-chat.cpp`): accept Python literals (`True`/`False`/`None`, single-quoted strings/containers), accept undeclared/alias `<parameter=...>` tags, and fall back to raw strings on malformed non-string JSON values while keeping strict GBNF generation unchanged.
